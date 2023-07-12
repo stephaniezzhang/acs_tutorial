@@ -1,0 +1,174 @@
+---
+title: "ACS Tutorial"
+format: html
+editor: visual
+---
+
+# American Community Survey Statistics in R (tidycensus)
+
+For the MPIDR Tutorial: The American Community Survey and Administrative Data 14 July, 2023 Stephanie Zhang For the tutorial: https://docs.google.com/presentation/d/1gQmu520Y_Cg2Wh93UviOf_mKvvKZH3sSzdylF973kN0/edit?usp=sharing
+
+## 0: Setup
+
+```{r}
+library(tidyverse)
+library(tidycensus)
+library(ggplot2)
+library(sf)
+library(wesanderson)
+```
+
+## 1: Setup
+
+### API Key
+
+census API key here: https://api.census.gov/data/key_signup.html I have one installed already but if you'd like to follow along you can sign up for one!
+
+```{r}
+#census_api_key(" ", install=TRUE)
+```
+
+### Colors
+
+definitely the most important thing
+
+```{r}
+colors <- wes_palette("Zissou1")
+zissouPalette <- wes_palette("Zissou1", 20, type = "continuous")
+```
+
+If you don't want to use the Wes Anderson palette you can replace all the places I have "scale_fill_gradientn(colours = zissouPalette)" with "+ scale_fill_viridis_c()"
+
+## 2: Finding which variables to pull
+
+We're going to focus on the ACS but you can find census information at aggregate levels (state, county, etc). I'm going to load the 5 year projections from 2017-2021 (the most recent 5 year estimate). This just means these are based on data collected across 5 years and are the most reliable.
+
+For more information: https://www.census.gov/data/developers/data-sets.html For more information on what datasets tidycensus supports/does not support: https://walker-data.com/tidycensus/articles/other-datasets.html
+
+```{r}
+variables <- load_variables(2021, 'acs5', cache=TRUE)
+```
+
+There are a lot of variables: here is some information about how to understand what the tables mean: https://www.census.gov/programs-surveys/acs/data/data-tables/table-ids-explained.html
+
+Since ACS Statistics are estimates, they include margins of error. These are at a 90% confidence interval.
+
+## 3: A simple example
+
+code adapted from: https://walker-data.com/tidycensus/articles/basic-usage.html
+
+Let's say we want to find the median income of counties in Virginia. We would want to search in the variables table to see which income related tables we can draw from:
+
+```{r}
+vaIncomeFull <- get_acs(geography = "county", table= "B19013", state= 'VA') 
+
+vaIncomeTop <- vaIncomeFull %>% slice_max(estimate, n=15)
+
+# ok lets graph it!
+
+vaIncomeTop %>% ggplot(aes(x=estimate, y= reorder(NAME, estimate))) + 
+  geom_errorbarh(aes(xmax = estimate + moe,  xmin = estimate - moe))+
+  geom_point(color = '#3B9AB2') + 
+  labs(y="County", x="ACS Estimate of Median Income (w/Margin of Error)") + 
+  ggtitle("Top 15 Counties by Median Income")
+```
+
+Side note for anyone wondering: the US Census Bureau treats cities in Virginia as Counties. This is unique (supposedly) to Virginia and has to do with powers held by city government.
+
+## 4: A more complicated example
+
+Let's go back to this question about domestic migration. Suppose we want to find some information
+
+First let's figure out what table to use:
+
+```{r}
+stateMobility <- get_acs(geography = "state", table = "B07001", year=2021, output='wide', geometry=TRUE) %>% select("GEOID", "NAME", "B07001_001E", "B07001_001M", "B07001_017E", "B07001_017M", "geometry")
+
+```
+
+Change column names and calculate the proportion of people estimated to have stayed in a given state for at least the past year
+
+```{r}
+colnames(stateMobility) <- c("State ID", "State", "popEstimate", "popEstimateMOE", "stayerEstimate", "stayerEstimateMOE", "geometry")
+
+# find the proportion of people who stayed
+stateMobility$propStayed <- stateMobility$stayerEstimate/stateMobility$popEstimate
+```
+
+ok let's map it!
+
+```{r}
+stateMobility %>% filter(!is.na("popEstimate")) %>% ggplot(aes(fill=propStayed)) + geom_sf(color=NA) + coord_sf(xlim = c(-180, -60), ylim = c(5, 73), expand = FALSE) + scale_fill_gradientn(colours = zissouPalette)
+```
+
+I do not like this projection for mapping the entirety of the US but it works quite nicely with smaller geographies (keep reading).
+
+## 5: Ok but how small is a small area
+
+Let's do some mapping with areas where population might be sparser. Suppose we want to find some information about the racial composition of a given area.
+
+```{r}
+#location <- c("Charlottesville city", "Albemarle County")
+cvilleRace <- get_acs(geography = 'tract', table = 'B02001', year = 2021, 
+                      state = 'VA', county = "Charlottesville city", output = 'wide', geometry = TRUE)
+```
+
+Fix the column names to be less ugly.
+
+```{r}
+colnames(cvilleRace) <- c("tractID", 'tractName', 'totalEstimate', 'totalMOE', 'whiteEstimate', 'whiteMOE', 'blackEstimate', 'blackMOE', 'aianEstimate', 'aianMOE', 'asianEstimate', 'asianMOE', 'hawaiiEstimate', 'hawaiiMOE', 'otherEstimate', 'otherMOE', 'twoEstimate', 'twoMOE', 'twoOtherEstimate', 'twoOtherMOE', 'threePlusEstimate', 'threePlusMOE', 'geometry')
+```
+
+We now have the raw counts, but this tells us very little about racial composition so let's get some percentages.
+
+To make this table a bit less clunky, we'll focus on the largest racial categories in this area.
+
+\*The multiracial categories are new in this 5 year estimate
+
+```{r}
+cvilleRacePer <- cvilleRace %>% mutate(whitePer = round((whiteEstimate/totalEstimate) * 100, 1),
+                                    blackPer = round((blackEstimate/totalEstimate) * 100, 1),
+                                    asianPer = round((asianEstimate/totalEstimate) * 100, 1),
+                                    otherPer = round((otherEstimate/totalEstimate) * 100, 1),
+                                    multiPer = round((twoEstimate/totalEstimate) * 100, )) %>% select("tractID", "tractName", 'whitePer', 'blackPer', 'asianPer', 'otherPer', 'multiPer', 'geometry')
+```
+
+One last note: the 2020 decennial census has the same information and may in fact, be less unwieldy (I'm not sure--I haven't worked with it). However, questions around timeliness mean that the census is not always there or the most up to date source of information.
+
+ok mapping time for Charlottesville Percentage of white residents
+
+```{r}
+cvilleRacePer %>% ggplot(aes(fill=whitePer)) + geom_sf(color=NA) + scale_fill_gradientn(colours = zissouPalette)
+```
+
+Percentage of Black residents
+
+```{r}
+cvilleRacePer %>% ggplot(aes(fill=blackPer)) + geom_sf(color=NA) + scale_fill_gradientn(colours = zissouPalette)
+```
+
+percentage of Asian residents
+
+```{r}
+cvilleRacePer %>% ggplot(aes(fill=asianPer)) + geom_sf(color=NA) + scale_fill_gradientn(colours = zissouPalette)
+```
+
+percentage of people who identify as multiracial
+
+```{r}
+cvilleRacePer %>% ggplot(aes(fill=multiPer)) + geom_sf(color=NA)+ scale_fill_gradientn(colours = zissouPalette) 
+```
+
+If anyone is interested in the history of housing/race in Charlottesville: https://news.virginia.edu/content/uva-and-history-race-property-and-power
+
+## 6: More resources for working with tidycensus/acs
+
+tidycensus documentation: https://walker-data.com/tidycensus/index.html
+
+to work with ACS in python: https://medium.com/@mcmanus_data_works/using-the-u-s-census-bureau-api-with-python-5c30ad34dbd7
+
+census api package (disclaimer i have never worked with this): https://cran.r-project.org/web/packages/censusapi/index.html
+
+IPUMS: https://usa.ipums.org/usa/ IPUMS has a sample of responses (anonymized) from some recent releases
+
+article on differential privacy: https://www.science.org/doi/10.1126/sciadv.abk3283
